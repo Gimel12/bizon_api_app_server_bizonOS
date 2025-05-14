@@ -1,0 +1,17 @@
+version: '3'
+
+services:
+  bizon-api-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bizon-api-server
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+      - "8000:8000"
+    volumes:
+      - ./assets:/app/assets
+    environment:
+      - NODE_ENV=production
+      - TZ=UTC

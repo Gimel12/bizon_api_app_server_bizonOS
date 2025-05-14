@@ -1,0 +1,17 @@
+[Unit]
+Description=Bizon-Tech SSH API Server
+After=network.target
+
+[Service]
+# Running as system user for global access
+WorkingDirectory=/opt/bizon-api-server
+ExecStart=/usr/bin/node /opt/bizon-api-server/index.js
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=bizon-api
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

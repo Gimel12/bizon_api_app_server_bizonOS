@@ -1,0 +1,13 @@
+[Unit]
+Description=Bizon-Tech API Update Service
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/bizon-api-server
+ExecStart=/opt/bizon-api-server/auto_update.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

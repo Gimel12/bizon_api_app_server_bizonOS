@@ -1,0 +1,16 @@
+[Unit]
+Description=Bizon-Tech Static Camera Server
+After=network.target
+
+[Service]
+# Running as system user for global access
+WorkingDirectory=/opt/bizon-api-server
+ExecStart=/usr/bin/python3 /opt/bizon-api-server/static_camera_server.py
+Restart=always
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=bizon-static-camera
+
+[Install]
+WantedBy=multi-user.target
