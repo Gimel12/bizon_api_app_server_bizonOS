@@ -1,18 +1,242 @@
-# Bizon-Tech API Server Suite
+# Bizon-Tech API Server Suite v2.1
 
-This package provides a complete API solution for Bizon-Tech workstations and servers, including:
+## Overview
 
-1. **Node.js API Server**: Secure API for SSH interactions
-2. **Camera Server**: Python-based camera streaming service
-3. **Static Camera Server**: Lightweight camera image capture service
+The Bizon-Tech API Server Suite provides a complete solution for remote monitoring, management, and **AI-powered diagnostics** of Bizon workstations. It consists of four main components:
+
+1. **Node.js REST API Server** (Port 4000) - Main API for system information, SSH commands, GPU management, and workstation control
+2. **BizonAI Diagnostic Agent** (via REST API) - Claude-powered AI that runs commands on the machine to diagnose and fix hardware issues
+3. **MCP Server** (stdio or SSE on Port 4001) - Model Context Protocol server enabling AI models to control workstations
+4. **Python Camera Server** (Port 8000) - Handles webcam streaming and image capture
 
 ## Features
 
 - SSH connection verification and remote command execution
 - System information retrieval and hardware monitoring
+- **Real-time GPU monitoring** (temperature, utilization, power, memory, clocks)
+- **GPU power limit (TDP) control** via `nvidia-smi`
+- **Fan speed control** via `nvidia-settings` or IPMI
+- **Process management** (system and GPU processes)
+- **Disk usage and network statistics**
+- **System health dashboard** (CPU, memory, swap, temps, load)
+- **BizonAI Diagnostic Agent** — AI-powered hardware diagnostics with tool calling, rate limiting, and prompt caching
+- **MCP Server** for AI model integration (Claude, Cursor, etc.)
 - Live camera streaming and image capture
 - Automatic updates from GitHub repository
 - Systemd service integration for reliability
+
+## Architecture (v2.1)
+
+```
+bizon_api_app_server_bizonOS/
+├── index.js              # Express REST API entry point (port 4000)
+├── mcp-server.js         # MCP server entry point (stdio or SSE port 4001)
+├── package.json
+├── mcp-config.json       # MCP client configuration template
+├── knowledge-base.json   # Bizon diagnostic knowledge base for AI agent
+├── rate-limits.json      # Auto-generated: per-user daily rate limits
+├── lib/
+│   ├── ssh-manager.js    # SSH connection pooling & command execution
+│   └── middleware.js      # Request validation, logging, error handling
+├── routes/
+│   ├── system.js         # /api/ssh-uname, /api/system-info, /api/detailed-specs
+│   ├── commands.js       # /api/run-command, /api/run-sudo-command
+│   ├── gpu.js            # /api/gpu-status, /api/gpu-processes, /api/set-gpu-power-limit, /api/set-fan-speed
+│   ├── monitoring.js     # /api/processes, /api/disk-usage, /api/network-stats, /api/system-health, /api/reboot, /api/shutdown
+│   ├── camera.js         # /api/camera-stream, /api/camera-feed
+│   └── diagnostic.js     # /api/diagnostic/chat, /api/diagnostic/quick-actions, /api/diagnostic/rate-limit
+```
+
+## MCP Server
+
+The MCP (Model Context Protocol) server allows AI models like Claude to directly control and monitor Bizon workstations.
+
+### Quick Start
+
+**stdio transport** (for Claude Desktop, Cursor, Windsurf):
+```bash
+npm run mcp
+```
+
+**SSE transport** (for remote/network AI integrations):
+```bash
+npm run mcp:sse
+```
+
+**Run both REST API + MCP SSE together:**
+```bash
+npm run start:all
+```
+
+### Claude Desktop / Cursor Configuration
+
+Add this to your MCP client config (e.g. `claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "bizon-workstation": {
+      "command": "node",
+      "args": ["mcp-server.js", "--transport", "stdio"],
+      "cwd": "/opt/bizon-api-server"
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_system_info` | Basic system info (hostname, CPU, memory, GPUs, kernel, BizonOS) |
+| `get_detailed_specs` | Full hardware specifications |
+| `get_gpu_status` | Real-time GPU metrics (temp, util, power, memory, clocks, fan) |
+| `get_system_health` | Overall system health (CPU, memory, swap, GPU temps, disk, cooling) |
+| `run_command` | Execute shell commands via SSH |
+| `run_sudo_command` | Execute privileged commands with sudo |
+| `set_gpu_power_limit` | Set GPU TDP in watts (requires sudo) |
+| `set_fan_speed` | Set fan speed 0-100% (requires sudo) |
+| `reboot_machine` | Reboot the workstation (requires sudo) |
+| `shutdown_machine` | Shut down the workstation (requires sudo) |
+| `get_processes` | List running processes sorted by CPU or memory |
+| `get_gpu_processes` | List GPU-accelerated processes |
+| `get_disk_usage` | Disk usage and block device info |
+| `get_network_info` | Network interfaces, routes, DNS, connections |
+| `manage_service` | Start/stop/restart/status systemd services |
+| `install_package` | Install apt packages (requires sudo) |
+| `read_file` | Read file contents from the workstation |
+| `write_file` | Write/append to files on the workstation |
+
+## REST API Endpoints
+
+### Health & Info
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/ping` | Health check |
+| GET | `/api/version` | API version and feature list |
+
+### System
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/ssh-uname` | Verify SSH connection + basic info |
+| POST | `/api/system-info` | System summary |
+| POST | `/api/detailed-specs` | Full hardware specifications |
+| POST | `/api/system-health` | Real-time health metrics |
+
+### Commands
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/run-command` | Execute shell command |
+| POST | `/api/run-sudo-command` | Execute with sudo |
+
+### GPU
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/gpu-status` | Real-time GPU metrics |
+| POST | `/api/gpu-processes` | GPU process list |
+| POST | `/api/set-gpu-power-limit` | Set GPU TDP (watts) |
+| POST | `/api/set-fan-speed` | Set fan speed (0-100%) |
+
+### Monitoring
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/processes` | System process list |
+| POST | `/api/disk-usage` | Disk usage info |
+| POST | `/api/network-stats` | Network statistics |
+| POST | `/api/reboot` | Reboot machine |
+| POST | `/api/shutdown` | Shutdown machine |
+
+### Camera
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/camera-stream` | HTML MJPEG viewer |
+| GET | `/api/camera-feed` | Raw MJPEG stream |
+
+### BizonAI Diagnostic Agent
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/diagnostic/chat` | AI-powered diagnostic chat (Claude + tool calling) |
+| GET | `/api/diagnostic/quick-actions` | Get preset diagnostic quick actions |
+| GET | `/api/diagnostic/rate-limit/:userId` | Check remaining daily requests |
+
+## BizonAI Diagnostic Agent
+
+The diagnostic agent uses Claude (Anthropic) with tool calling to run commands on the workstation, analyze output, and diagnose hardware issues — all from the mobile app.
+
+### How It Works
+
+1. User sends a message (e.g., "Check my GPUs for errors")
+2. The API server sends the message to Claude with a `run_ssh_command` tool
+3. Claude decides which commands to run (e.g., `nvidia-smi`, `dmesg | grep xid`)
+4. The server executes each command via SSH and feeds results back to Claude
+5. Claude analyzes the output and returns a diagnostic summary
+6. The full response with usage stats is sent to the mobile app
+
+### Key Features
+
+- **Tool Calling Loop** — Claude autonomously runs up to 10 command iterations per request
+- **Rate Limiting** — 5 requests/day per user (tracked in `rate-limits.json`)
+- **Prompt Caching** — System prompt + knowledge base cached via Anthropic's `cache_control`, saving ~90% input tokens on repeat requests
+- **Knowledge Base** — `knowledge-base.json` contains Bizon-specific diagnostic commands, GPU fan curve workflows, TDP change procedures, and troubleshooting guides
+- **Sudo Support** — Optional sudo password for privileged commands (IPMI, smartctl, ras-mc-ctl)
+- **90s Hard Timeout** — Prevents requests from hanging indefinitely
+- **Quick Actions** — 6 preset diagnostic prompts: Health Check, GPU Diagnostics, Memory Errors, Storage Health, Temperatures, Error Scan
+
+### Environment Setup
+
+**Required:** Set the `ANTHROPIC_API_KEY` environment variable on the workstation:
+
+```bash
+# Add to /etc/environment or the systemd service file
+ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+```
+
+For the systemd service:
+```bash
+sudo systemctl edit bizon-api.service
+# Add under [Service]:
+# Environment=ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+sudo systemctl restart bizon-api.service
+```
+
+### Request Format
+
+```json
+POST /api/diagnostic/chat
+{
+  "username": "bizon",
+  "password": "...",
+  "messages": [
+    { "role": "user", "content": "Check my GPUs for errors" }
+  ],
+  "userId": "firebase_uid",
+  "sudoPassword": "optional_sudo_pass"
+}
+```
+
+### Response Format
+
+```json
+{
+  "content": "## GPU Diagnostic Report\n...",
+  "usage": {
+    "inputTokens": 1500,
+    "outputTokens": 800,
+    "totalTokens": 2300,
+    "cacheReadTokens": 1200,
+    "toolCalls": 3,
+    "iterations": 2
+  },
+  "toolCalls": [
+    { "command": "nvidia-smi --query-gpu=...", "duration": 1200 },
+    { "command": "dmesg | grep xid", "duration": 800 }
+  ],
+  "rateLimit": {
+    "remaining": 4,
+    "total": 5,
+    "resetsAt": "2026-03-03T00:00:00.000Z"
+  }
+}
+```
 
 ## Installation
 
@@ -135,13 +359,7 @@ By default, the system checks for updates daily and applies them automatically. 
 
 Update logs are stored in `/var/log/bizon-update.log`
 
-## API Endpoints
-
-### API Server (Port 4000)
-
-- `GET /api/ssh-uname` - Verify SSH connection by running uname -a
-- `POST /api/run-command` - Execute a command on the machine
-- `GET /api/system-info` - Get detailed system information
+## Additional Servers
 
 ### Camera Server (Port 8000)
 
@@ -158,7 +376,11 @@ This API server suite should only be accessible on your local network. It does n
 
 After installation, all files are stored in `/opt/bizon-api-server/` with the following structure:
 
-- `index.js` - Main API server code
+- `index.js` - Main API server entry point
+- `mcp-server.js` - MCP server entry point
+- `knowledge-base.json` - Bizon diagnostic knowledge base
+- `lib/` - SSH manager and middleware
+- `routes/` - Modular route handlers (system, commands, gpu, monitoring, camera, diagnostic)
 - `camera_server.py` - Camera streaming server
 - `static_camera_server.py` - Static camera server
 - `*.service` - Systemd service files

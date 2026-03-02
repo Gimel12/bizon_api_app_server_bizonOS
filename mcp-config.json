@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bizon-workstation": {
+      "command": "node",
+      "args": ["mcp-server.js", "--transport", "stdio"],
+      "cwd": "/opt/bizon-api-server",
+      "env": {},
+      "description": "Bizon-Tech Workstation Management — control and monitor AI workstations and GPU servers via MCP"
+    }
+  }
+}

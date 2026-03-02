@@ -1,0 +1,369 @@
+{
+  "description": "Bizon Tech Internal Knowledge Base - Custom commands and diagnostics",
+  "lastUpdated": "2025-01-30",
+  "categories": {
+    "rtx_6000_pro_fan_curve": {
+      "title": "RTX 6000 Pro / RTX PRO 6000 GPU Fan Curve Setup",
+      "description": "IMPORTANT: This ONLY applies to RTX 6000 Pro and RTX PRO 6000 GPUs. Do NOT use for other GPU models.",
+      "workflow": {
+        "trigger": "When user reports RTX 6000 Pro or RTX PRO 6000 getting too hot, or asks to set up fan curve for these specific GPUs",
+        "steps": [
+          "1. First, ASK the user: 'Does your RTX 6000 Pro have a blower-style cooler (single fan) or a dual-fan cooler?'",
+          "2. Wait for user response before running any commands",
+          "3. BEFORE running Docker containers, install nvidia-container-toolkit if not already installed",
+          "4. If BLOWER/SINGLE FAN: Run the v1.0 Docker commands",
+          "5. If DUAL FAN: Run the v2.0 Docker commands"
+        ]
+      },
+      "commands": [
+        {
+          "name": "Install NVIDIA Container Toolkit (REQUIRED FIRST)",
+          "command": "sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit && sudo systemctl restart docker",
+          "description": "MUST run this first to enable GPU access in Docker containers. Installs nvidia-container-toolkit and restarts Docker."
+        },
+        {
+          "name": "Pull fan control image (Blower/Single-Fan - v1.0)",
+          "command": "sudo docker pull gimel12/gpu-fan-control:v1.0",
+          "description": "Downloads the fan control Docker image for single-fan/blower GPUs like A6000"
+        },
+        {
+          "name": "Run fan control (Blower/Single-Fan - v1.0)",
+          "command": "docker run -d --restart unless-stopped --privileged --gpus all gimel12/gpu-fan-control:v1.0",
+          "description": "Starts the fan control container for single-fan/blower GPUs"
+        },
+        {
+          "name": "Pull fan control image (Dual-Fan - v2.0)",
+          "command": "sudo docker pull gimel12/gpu-fan-control:v2.0",
+          "description": "Downloads the fan control Docker image for dual-fan GPUs like RTX PRO 6000 Blackwell"
+        },
+        {
+          "name": "Run fan control (Dual-Fan - v2.0)",
+          "command": "docker run -d --restart unless-stopped --privileged --gpus all gimel12/gpu-fan-control:v2.0",
+          "description": "Starts the fan control container for dual-fan GPUs"
+        },
+        {
+          "name": "Check if fan control container is running",
+          "command": "docker ps | grep gpu-fan-control",
+          "description": "Verifies the fan control container is active"
+        },
+        {
+          "name": "Check fan control logs",
+          "command": "docker logs $(docker ps -q --filter ancestor=gimel12/gpu-fan-control:v1.0) 2>/dev/null || docker logs $(docker ps -q --filter ancestor=gimel12/gpu-fan-control:v2.0) 2>/dev/null || echo 'No fan control container running'",
+          "description": "Shows logs from the fan control container"
+        },
+        {
+          "name": "Verify fan curve is working",
+          "command": "nvidia-smi --query-gpu=index,name,fan.speed,temperature.gpu --format=csv",
+          "description": "Check GPU fan speeds and temperatures - fans should be ~40% at idle, 100% when temp >75°C"
+        }
+      ],
+      "verification": {
+        "description": "To verify the fan curve is working correctly for RTX 6000 Pro:",
+        "expected_behavior": [
+          "At IDLE (low temps): Fan speed should be around 40%",
+          "At HIGH LOAD (temps >75°C): Fan speed should ramp up to 100%",
+          "Run nvidia-smi to check current fan speeds and temperatures"
+        ],
+        "check_command": "nvidia-smi --query-gpu=index,name,fan.speed,temperature.gpu --format=csv"
+      },
+      "notes": "This fan curve solution is EXCLUSIVELY for RTX 6000 Pro and RTX PRO 6000 GPUs. Do NOT suggest this for other GPU models like RTX 4090, RTX 3090, etc. Always ask the user about their fan configuration (blower vs dual-fan) BEFORE running any Docker commands."
+    },
+    "gpu_diagnostics": {
+      "title": "GPU Diagnostic Commands",
+      "commands": [
+        {
+          "name": "Check GPU Xid errors",
+          "command": "dmesg | grep -i 'xid' | tail -20",
+          "description": "Shows NVIDIA Xid errors which indicate GPU hardware issues"
+        },
+        {
+          "name": "GPU memory test",
+          "command": "nvidia-smi -q -d MEMORY",
+          "description": "Detailed GPU memory information including ECC errors"
+        },
+        {
+          "name": "GPU power and clocks",
+          "command": "nvidia-smi -q -d CLOCK,POWER",
+          "description": "Shows current clock speeds and power draw"
+        },
+        {
+          "name": "Reset GPU",
+          "command": "nvidia-smi -r",
+          "description": "Resets the GPU - use with caution"
+        },
+        {
+          "name": "Enable persistence mode",
+          "command": "sudo nvidia-smi -pm 1",
+          "description": "Enables persistence mode to keep driver loaded"
+        }
+      ],
+      "notes": "Xid 79 = GPU fallen off bus (hardware issue). Xid 31/32 = memory errors. Xid 43/45 = power issues."
+    },
+    "ecc_memory": {
+      "title": "ECC Memory Diagnostics",
+      "commands": [
+        {
+          "name": "Check ECC errors",
+          "command": "sudo ras-mc-ctl --errors 2>/dev/null || echo 'ras-mc-ctl not installed'",
+          "description": "Shows corrected and uncorrected ECC memory errors"
+        },
+        {
+          "name": "ECC summary",
+          "command": "sudo ras-mc-ctl --summary 2>/dev/null",
+          "description": "Summary of memory controller errors"
+        },
+        {
+          "name": "EDAC status",
+          "command": "cat /sys/devices/system/edac/mc/mc*/dimm*/dimm_label 2>/dev/null | sort -u",
+          "description": "Lists DIMM labels from EDAC subsystem"
+        },
+        {
+          "name": "Memory errors in dmesg",
+          "command": "dmesg | grep -iE 'mce|edac|ecc|memory error' | tail -30",
+          "description": "Memory-related errors from kernel messages"
+        }
+      ],
+      "notes": "Corrected errors (CE) are self-healing. Uncorrected errors (UE) indicate failing memory that needs replacement."
+    },
+    "stress_testing": {
+      "title": "Stress Testing Commands",
+      "commands": [
+        {
+          "name": "Check if stress-ng is running",
+          "command": "pgrep -a stress-ng || echo 'Not running'",
+          "description": "Shows if CPU stress test is active"
+        },
+        {
+          "name": "Check if gpu-burn is running",
+          "command": "pgrep -a gpu_burn || echo 'Not running'",
+          "description": "Shows if GPU burn test is active"
+        },
+        {
+          "name": "Start CPU stress test (8 hours)",
+          "command": "nohup stress-ng --cpu 0 --timeout 8h > /tmp/stress.log 2>&1 &",
+          "description": "Starts 8-hour CPU stress test in background"
+        },
+        {
+          "name": "Stop CPU stress test",
+          "command": "pkill stress-ng",
+          "description": "Kills any running stress-ng processes"
+        },
+        {
+          "name": "Check stress test log",
+          "command": "tail -50 /tmp/stress.log 2>/dev/null || echo 'No log found'",
+          "description": "Shows recent stress test output"
+        }
+      ],
+      "notes": "Always monitor temperatures during stress tests. Stop immediately if temps exceed safe limits."
+    },
+    "gpu_burn_test": {
+      "title": "GPU Burn Stress Test",
+      "description": "GPU burn test is located at /home/bizon/Downloads/gpu-burn. Use this for GPU stress testing.",
+      "workflow": {
+        "trigger": "When user asks to run GPU test, GPU burn, GPU stress test, or test GPUs",
+        "steps": [
+          "1. Navigate to /home/bizon/Downloads/gpu-burn",
+          "2. Run ./gpu_burn with -tc flag and duration in SECONDS",
+          "3. Duration conversion: 1 hour = 3600 seconds, 2 hours = 7200 seconds, 8 hours = 28800 seconds"
+        ]
+      },
+      "commands": [
+        {
+          "name": "Check if gpu-burn exists",
+          "command": "ls -la /home/bizon/Downloads/gpu-burn/gpu_burn",
+          "description": "Verify gpu_burn binary exists"
+        },
+        {
+          "name": "Check if GPU burn is already running",
+          "command": "pgrep -a gpu_burn || echo 'GPU burn not running'",
+          "description": "Check for existing gpu_burn processes"
+        },
+        {
+          "name": "Run GPU burn for 1 hour",
+          "command": "cd /home/bizon/Downloads/gpu-burn && nohup ./gpu_burn -tc 3600 > /tmp/gpu_burn.log 2>&1 &",
+          "description": "Start 1-hour GPU burn test (3600 seconds) in background"
+        },
+        {
+          "name": "Run GPU burn for 2 hours",
+          "command": "cd /home/bizon/Downloads/gpu-burn && nohup ./gpu_burn -tc 7200 > /tmp/gpu_burn.log 2>&1 &",
+          "description": "Start 2-hour GPU burn test (7200 seconds) in background"
+        },
+        {
+          "name": "Run GPU burn for 8 hours",
+          "command": "cd /home/bizon/Downloads/gpu-burn && nohup ./gpu_burn -tc 28800 > /tmp/gpu_burn.log 2>&1 &",
+          "description": "Start 8-hour GPU burn test (28800 seconds) in background"
+        },
+        {
+          "name": "Stop GPU burn test",
+          "command": "pkill gpu_burn",
+          "description": "Kills any running gpu_burn processes"
+        },
+        {
+          "name": "Check GPU burn log",
+          "command": "tail -50 /tmp/gpu_burn.log 2>/dev/null || echo 'No log found'",
+          "description": "Shows recent GPU burn test output"
+        },
+        {
+          "name": "Monitor GPUs during burn test",
+          "command": "nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,power.draw --format=csv",
+          "description": "Check GPU temps and utilization during test"
+        }
+      ],
+      "notes": "IMPORTANT: gpu_burn is located at /home/bizon/Downloads/gpu-burn/gpu_burn. The -tc flag enables tensor core testing. Duration is in SECONDS not hours. Always monitor GPU temperatures during the test."
+    },
+    "bios_info": {
+      "title": "BIOS and System Information",
+      "commands": [
+        {
+          "name": "BIOS version",
+          "command": "sudo dmidecode -t bios | grep -E 'Vendor|Version|Release'",
+          "description": "Shows BIOS manufacturer and version"
+        },
+        {
+          "name": "System info",
+          "command": "sudo dmidecode -t system | grep -E 'Manufacturer|Product|Serial'",
+          "description": "Shows system manufacturer, model, and serial number"
+        },
+        {
+          "name": "Memory slots",
+          "command": "sudo dmidecode -t memory | grep -E 'Size|Type|Speed|Manufacturer|Part' | head -40",
+          "description": "Shows installed memory modules"
+        },
+        {
+          "name": "CPU info from DMI",
+          "command": "sudo dmidecode -t processor | grep -E 'Version|Core|Thread'",
+          "description": "CPU details from system DMI"
+        }
+      ],
+      "notes": "dmidecode requires sudo for accurate information"
+    },
+    "gpu_tdp_wattage": {
+      "title": "GPU TDP / Wattage / Power Limit Change",
+      "description": "Change the GPU power limit (TDP/wattage) on the system by modifying the script at /home/bizon/.gpu/gpu_tdp.sh. CRITICAL: You MUST modify the script file FIRST, then run it. Do NOT run nvidia-smi -pl directly — always go through the script file.",
+      "workflow": {
+        "trigger": "When user asks to change GPU wattage, TDP, power limit, or power draw",
+        "steps": [
+          "STEP 1: If the user did NOT specify the wattage, ASK: 'What wattage (power limit) would you like to set for the GPUs? (e.g. 100, 300, 350, 500)' — WAIT for their answer before doing anything.",
+          "STEP 2: Once you have the wattage number, MODIFY THE SCRIPT FILE FIRST. The file is /home/bizon/.gpu/gpu_tdp.sh and it is owned by root, so you MUST use sudo to write to it. Run this command (replacing WATTAGE with the actual number): sudo bash -c \"cat > /home/bizon/.gpu/gpu_tdp.sh << 'EOF'\n#!/bin/bash\necho 'root' | sudo -S nvidia-smi -pm 1\necho 'root' | sudo -S nvidia-smi -pl WATTAGE\nEOF\"",
+          "STEP 3: VERIFY the file was written correctly by reading it back: cat /home/bizon/.gpu/gpu_tdp.sh — confirm the power limit line is UNCOMMENTED and shows the correct wattage number.",
+          "STEP 4: Only AFTER confirming the file is correct, run the script to apply: sudo bash /home/bizon/.gpu/gpu_tdp.sh",
+          "STEP 5: Verify the GPUs changed: nvidia-smi --query-gpu=index,name,power.limit,power.draw --format=csv",
+          "STEP 6: Report to the user: show the new power limits AND confirm the script file was updated."
+        ]
+      },
+      "commands": [
+        {
+          "name": "Step 1 - Check current GPU power limits",
+          "command": "nvidia-smi --query-gpu=index,name,power.limit,power.default_limit,power.draw --format=csv",
+          "description": "Shows current power limit, default limit, and actual power draw for each GPU"
+        },
+        {
+          "name": "Step 2 - MODIFY the script file (replace WATTAGE with the number, e.g. 100, 300, 500)",
+          "command": "sudo bash -c \"cat > /home/bizon/.gpu/gpu_tdp.sh << 'EOF'\n#!/bin/bash\necho 'root' | sudo -S nvidia-smi -pm 1\necho 'root' | sudo -S nvidia-smi -pl WATTAGE\nEOF\"",
+          "description": "CRITICAL: This MUST be done FIRST before applying. Writes the gpu_tdp.sh script with the power limit UNCOMMENTED and set to the requested wattage. Uses sudo because the file is owned by root. Replace WATTAGE with the actual number."
+        },
+        {
+          "name": "Step 3 - VERIFY the file was modified correctly",
+          "command": "cat /home/bizon/.gpu/gpu_tdp.sh",
+          "description": "Read the file back to confirm it was written correctly. The power limit line must be UNCOMMENTED and show the correct wattage."
+        },
+        {
+          "name": "Step 4 - Apply by running the script",
+          "command": "sudo bash /home/bizon/.gpu/gpu_tdp.sh",
+          "description": "Runs the gpu_tdp.sh script to apply the power limit. Only run AFTER confirming the file was modified correctly in Step 3."
+        },
+        {
+          "name": "Step 5 - Verify GPU power limits changed",
+          "command": "nvidia-smi --query-gpu=index,name,power.limit,power.draw --format=csv",
+          "description": "Verify that the new power limit was applied successfully to all GPUs"
+        },
+        {
+          "name": "Reset GPU to default wattage (only if user asks to reset)",
+          "command": "sudo bash -c \"cat > /home/bizon/.gpu/gpu_tdp.sh << 'EOF'\n#!/bin/bash\necho 'root' | sudo -S nvidia-smi -pm 1\n#echo 'root' | sudo -S nvidia-smi -pl 300\nEOF\"",
+          "description": "Resets the script so GPUs run at default wattage. The power limit line is COMMENTED OUT with # so it won't execute."
+        }
+      ],
+      "notes": "CRITICAL RULES: 1) NEVER run nvidia-smi -pl directly — ALWAYS modify the script file first, then run the script. 2) The file /home/bizon/.gpu/gpu_tdp.sh is owned by root, so you MUST use 'sudo' to write to it. 3) ALWAYS verify the file contents after writing by running 'cat /home/bizon/.gpu/gpu_tdp.sh' before applying. 4) The default state has the power limit line COMMENTED OUT with # — to change wattage you must UNCOMMENT it (remove the #) and set the number. 5) Follow the steps IN ORDER: modify file → verify file → run script → verify GPUs."
+    },
+    "storage_health": {
+      "title": "Storage Health Commands",
+      "commands": [
+        {
+          "name": "List all NVMe drives",
+          "command": "ls /dev/nvme* 2>/dev/null | grep -E 'nvme[0-9]+$' || echo 'No NVMe drives'",
+          "description": "Lists all NVMe device nodes"
+        },
+        {
+          "name": "NVMe health (first drive)",
+          "command": "sudo nvme smart-log /dev/nvme0 2>/dev/null || sudo smartctl -a /dev/nvme0",
+          "description": "Shows SMART health for first NVMe drive"
+        },
+        {
+          "name": "Check all drives health",
+          "command": "for d in /dev/sd? /dev/nvme?n1; do echo \"=== $d ===\"; sudo smartctl -H $d 2>/dev/null; done",
+          "description": "Quick health check on all drives"
+        },
+        {
+          "name": "Drive temperatures",
+          "command": "sudo smartctl -A /dev/nvme0 2>/dev/null | grep -i temp || sudo nvme smart-log /dev/nvme0 | grep -i temp",
+          "description": "Shows drive temperature"
+        }
+      ],
+      "notes": "NVMe drives use nvme-cli or smartctl. SATA drives use smartctl only."
+    }
+  },
+  "troubleshooting": {
+    "rtx_6000_pro_overheating": {
+      "symptom": "RTX 6000 Pro or RTX PRO 6000 GPU running hot / overheating",
+      "steps": [
+        "1. ASK the user: Does your RTX 6000 Pro have a blower-style cooler (single fan) or a dual-fan cooler?",
+        "2. For BLOWER/SINGLE FAN GPUs: Run 'sudo docker pull gimel12/gpu-fan-control:v1.0' then 'docker run -d --restart unless-stopped --privileged --gpus all gimel12/gpu-fan-control:v1.0'",
+        "3. For DUAL FAN GPUs: Run 'sudo docker pull gimel12/gpu-fan-control:v2.0' then 'docker run -d --restart unless-stopped --privileged --gpus all gimel12/gpu-fan-control:v2.0'",
+        "4. Verify with: nvidia-smi --query-gpu=index,name,fan.speed,temperature.gpu --format=csv",
+        "5. Expected: ~40% fan at idle, 100% fan when temp >75°C"
+      ],
+      "important": "This solution is ONLY for RTX 6000 Pro and RTX PRO 6000 GPUs. Do NOT use for other GPU models."
+    },
+    "gpu_not_detected": {
+      "symptom": "GPU not showing in nvidia-smi",
+      "steps": [
+        "Check lspci | grep -i nvidia",
+        "Check dmesg | grep -i nvidia",
+        "Verify GPU is seated properly",
+        "Check PCIe power connectors",
+        "Try nvidia-smi -r to reset"
+      ]
+    },
+    "high_temperatures": {
+      "symptom": "CPU or GPU running hot (general - not RTX 6000 Pro specific)",
+      "steps": [
+        "Check fan speeds with ipmitool sensor | grep fan",
+        "Verify airflow and dust buildup",
+        "Check thermal paste application",
+        "Ensure proper case ventilation",
+        "For RTX 6000 Pro specifically, see rtx_6000_pro_overheating troubleshooting"
+      ]
+    },
+    "gpu_wattage_change": {
+      "symptom": "User wants to change GPU wattage, TDP, or power limit",
+      "steps": [
+        "1. Ask user what wattage they want if not specified — WAIT for answer",
+        "2. MODIFY THE FILE FIRST using sudo: sudo bash -c \"cat > /home/bizon/.gpu/gpu_tdp.sh << 'EOF'\n#!/bin/bash\necho 'root' | sudo -S nvidia-smi -pm 1\necho 'root' | sudo -S nvidia-smi -pl WATTAGE\nEOF\" (replace WATTAGE with the number)",
+        "3. VERIFY the file was written: cat /home/bizon/.gpu/gpu_tdp.sh (confirm the line is uncommented with correct wattage)",
+        "4. THEN run the script: sudo bash /home/bizon/.gpu/gpu_tdp.sh",
+        "5. Verify GPUs: nvidia-smi --query-gpu=index,name,power.limit,power.draw --format=csv",
+        "6. Report results to user — confirm BOTH the file and GPUs are updated"
+      ],
+      "important": "NEVER run nvidia-smi -pl directly. ALWAYS modify the script file first with sudo (file is owned by root), verify it, then run the script."
+    },
+    "ecc_errors_detected": {
+      "symptom": "ECC memory errors in logs",
+      "steps": [
+        "Run sudo ras-mc-ctl --errors to identify affected DIMM",
+        "Check sudo ras-mc-ctl --summary for error counts",
+        "If correctable errors only, monitor for increase",
+        "If uncorrectable errors, replace affected DIMM"
+      ]
+    }
+  }
+}
