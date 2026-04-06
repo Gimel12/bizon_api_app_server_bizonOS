@@ -30,14 +30,15 @@ app.get('/ping', (req, res) => {
 // API version info
 app.get('/api/version', (req, res) => {
   res.json({
-    api: '2.0.0',
+    api: '2.1.0',
     features: [
       'system-info', 'detailed-specs', 'run-command', 'run-sudo-command',
       'gpu-status', 'gpu-processes', 'set-gpu-power-limit', 'set-fan-speed',
       'processes', 'disk-usage', 'network-stats', 'system-health',
       'reboot', 'shutdown', 'camera-stream', 'camera-feed',
-      'diagnostic-chat',
+      'diagnostic-chat', 'multi-backend-ai',
     ],
+    diagnosticBackends: ['claude', 'vllm', 'ollama'],
     mcp: true,
   });
 });

@@ -1,60 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const Anthropic = require('@anthropic-ai/sdk').default;
 const fs = require('fs');
 const path = require('path');
 const sshManager = require('../lib/ssh-manager');
+const { localExec } = require('../lib/local-exec');
 const { requireCredentials, asyncHandler } = require('../lib/middleware');
-
-// ─── Rate Limiting ───────────────────────────────────────────────────────────
-const DAILY_LIMIT = 5;
-const rateLimitFile = path.join(__dirname, '..', 'rate-limits.json');
-
-function loadRateLimits() {
-  try {
-    if (fs.existsSync(rateLimitFile)) {
-      return JSON.parse(fs.readFileSync(rateLimitFile, 'utf-8'));
-    }
-  } catch (e) {
-    console.error('[Diagnostic] Error loading rate limits:', e.message);
-  }
-  return {};
-}
-
-function saveRateLimits(limits) {
-  try {
-    fs.writeFileSync(rateLimitFile, JSON.stringify(limits, null, 2));
-  } catch (e) {
-    console.error('[Diagnostic] Error saving rate limits:', e.message);
-  }
-}
-
-function checkRateLimit(userId) {
-  const limits = loadRateLimits();
-  const today = new Date().toISOString().split('T')[0];
-  const userLimit = limits[userId];
-
-  if (!userLimit || userLimit.date !== today) {
-    return { allowed: true, remaining: DAILY_LIMIT, total: DAILY_LIMIT };
-  }
-
-  const remaining = Math.max(0, DAILY_LIMIT - userLimit.count);
-  return { allowed: remaining > 0, remaining, total: DAILY_LIMIT };
-}
-
-function incrementRateLimit(userId) {
-  const limits = loadRateLimits();
-  const today = new Date().toISOString().split('T')[0];
-
-  if (!limits[userId] || limits[userId].date !== today) {
-    limits[userId] = { date: today, count: 1 };
-  } else {
-    limits[userId].count += 1;
-  }
-
-  saveRateLimits(limits);
-  return DAILY_LIMIT - limits[userId].count;
-}
+const { getAvailableBackends, createBackend } = require('../lib/ai-backends');
 
 // ─── Knowledge Base ──────────────────────────────────────────────────────────
 let cachedKnowledgeBase = null;
@@ -127,23 +78,9 @@ EFFICIENCY RULES:
 4. Combine related checks into single commands when possible
 5. Keep your responses concise — this is a mobile app with limited screen space
 
-After running commands, provide a clear summary of findings with any issues highlighted.`;
+You have access to the run_ssh_command tool to execute commands on the workstation. Use it to gather information and diagnose issues.
 
-// ─── SSH Tool Definition ─────────────────────────────────────────────────────
-const SSH_TOOL = {
-  name: 'run_ssh_command',
-  description: 'Execute a Linux command on the connected Bizon workstation via SSH. Returns stdout and stderr.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      command: {
-        type: 'string',
-        description: 'The Linux command to execute (e.g., "nvidia-smi", "free -h", "dmesg | grep error")',
-      },
-    },
-    required: ['command'],
-  },
-};
+After running commands, provide a clear summary of findings with any issues highlighted.`;
 
 // ─── Quick Actions ───────────────────────────────────────────────────────────
 const QUICK_ACTIONS = [
@@ -198,47 +135,70 @@ router.get('/quick-actions', (req, res) => {
   res.json({ actions: QUICK_ACTIONS });
 });
 
-// GET /api/diagnostic/rate-limit/:userId
-router.get('/rate-limit/:userId', (req, res) => {
-  const { userId } = req.params;
-  const limit = checkRateLimit(userId);
-  res.json({
-    remaining: limit.remaining,
-    total: limit.total,
-    resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString(),
-  });
-});
+// GET /api/diagnostic/backends — list available AI backends
+router.get('/backends', asyncHandler(async (req, res) => {
+  const backends = await getAvailableBackends();
+  res.json({ backends });
+}));
 
 // POST /api/diagnostic/chat
-router.post('/chat', requireCredentials, asyncHandler(async (req, res) => {
-  const { username, password, messages, userId, sudoPassword } = req.body;
+router.post('/chat', asyncHandler(async (req, res) => {
+  const { username, password, messages, userId, sudoPassword, backend, model, systemPrompt: clientSystemPrompt } = req.body;
   const requestStart = Date.now();
-  const REQUEST_TIMEOUT_MS = 90000; // 90s hard cap — mobile app uses 120s timeout
+  const REQUEST_TIMEOUT_MS = 90000;
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'Messages array is required' });
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured on this workstation. Set it in the environment.' });
-  }
-
-  // Rate limit check
-  const userKey = userId || req.ip || 'anonymous';
-  const rateLimit = checkRateLimit(userKey);
-  if (!rateLimit.allowed) {
-    return res.status(429).json({
-      error: 'Daily diagnostic limit reached (5/day). Try again tomorrow.',
-      rateLimit: {
-        remaining: 0,
-        total: DAILY_LIMIT,
-        resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString(),
-      },
+  // ─── Resolve backend ──────────────────────────────────────────────────
+  const backendId = backend || 'claude'; // default to claude for backwards compatibility
+  const validBackends = ['claude', 'vllm', 'ollama'];
+  if (!validBackends.includes(backendId)) {
+    return res.status(400).json({
+      error: `Invalid backend: ${backendId}. Valid options: ${validBackends.join(', ')}`,
     });
   }
 
-  console.log(`[Diagnostic] Chat request from ${userKey}, ${messages.length} messages`);
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  // Validate backend-specific requirements
+  if (backendId === 'claude' && !process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({
+      error: 'ANTHROPIC_API_KEY not configured on this workstation. Set it in the environment.',
+    });
+  }
+
+  // For vllm/ollama — if no model specified, auto-detect from server
+  let resolvedModel = model || null;
+  if ((backendId === 'vllm' || backendId === 'ollama') && !resolvedModel) {
+    try {
+      const backends = await getAvailableBackends();
+      const info = backends[backendId];
+      if (!info || !info.available) {
+        return res.status(503).json({
+          error: `${backendId} backend is not available. Make sure the server is running.`,
+          hint: backendId === 'vllm'
+            ? 'Start vLLM with: conda activate vllm_env && vllm serve <model>'
+            : 'Start Ollama with: ollama serve, then pull a model: ollama pull <model>',
+        });
+      }
+      resolvedModel = info.defaultModel;
+    } catch (err) {
+      return res.status(503).json({
+        error: `Could not connect to ${backendId} backend: ${err.message}`,
+      });
+    }
+  }
+
+  const userKey = userId || req.ip || 'anonymous';
+  console.log(`[Diagnostic] Chat request from ${userKey}, backend=${backendId}, model=${resolvedModel || 'default'}, ${messages.length} messages`);
+
+  // Create the AI backend
+  let ai;
+  try {
+    ai = createBackend(backendId, resolvedModel);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to create ${backendId} backend: ${err.message}` });
+  }
 
   // Set up NDJSON streaming response
   res.setHeader('Content-Type', 'application/x-ndjson');
@@ -246,9 +206,12 @@ router.post('/chat', requireCredentials, asyncHandler(async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   const sendEvent = (data) => { try { res.write(JSON.stringify(data) + '\n'); } catch(e) {} };
 
-  // Build system prompt with knowledge base (cached)
+  // Build system prompt with knowledge base
+  // If the client sent a systemPrompt (managed via the desktop app repo), use it;
+  // otherwise fall back to the server's default SYSTEM_PROMPT.
+  const basePrompt = (clientSystemPrompt && clientSystemPrompt.trim()) ? clientSystemPrompt.trim() : SYSTEM_PROMPT;
   const knowledgeBase = loadKnowledgeBase();
-  const fullSystemPrompt = SYSTEM_PROMPT + knowledgeBase;
+  const fullSystemPrompt = basePrompt + knowledgeBase;
 
   // Limit conversation history to last 10 messages
   const recentMessages = messages
@@ -269,162 +232,105 @@ router.post('/chat', requireCredentials, asyncHandler(async (req, res) => {
   let iterations = 0;
 
   try {
-    sendEvent({ type: 'status', message: 'Connecting to AI...' });
+    sendEvent({ type: 'status', message: `Connecting to ${backendId}...` });
 
-    // Initial Claude call with prompt caching
-    let response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      system: [
-        {
-          type: 'text',
-          text: fullSystemPrompt,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: recentMessages,
-      tools: [SSH_TOOL],
-    });
+    // Initial AI call
+    let response = await ai.chat(fullSystemPrompt, recentMessages, true);
 
-    totalInputTokens += response.usage.input_tokens;
-    totalOutputTokens += response.usage.output_tokens;
-    if (response.usage.cache_read_input_tokens) {
-      cacheReadTokens += response.usage.cache_read_input_tokens;
-    }
-    if (response.usage.cache_creation_input_tokens) {
-      cacheCreationTokens += response.usage.cache_creation_input_tokens;
-    }
+    totalInputTokens += response.usage.inputTokens;
+    totalOutputTokens += response.usage.outputTokens;
+    cacheReadTokens += response.usage.cacheReadTokens;
+    cacheCreationTokens += response.usage.cacheCreationTokens;
 
     // Agentic tool use loop
     const conversationHistory = [...recentMessages];
 
-    while (response.stop_reason === 'tool_use' && iterations < MAX_TOOL_ITERATIONS) {
-      // Hard timeout check — bail out if approaching the limit
+    while (response.stopReason === 'tool_use' && iterations < MAX_TOOL_ITERATIONS) {
       if (Date.now() - requestStart > REQUEST_TIMEOUT_MS) {
         console.log(`[Diagnostic] Request timeout reached at iteration ${iterations}, forcing summary`);
         break;
       }
       iterations++;
 
-      const toolUseBlocks = response.content.filter(block => block.type === 'tool_use');
-      if (toolUseBlocks.length === 0) break;
+      const toolCalls = ai.getToolCalls(response.content);
+      if (toolCalls.length === 0) break;
 
-      conversationHistory.push({ role: 'assistant', content: response.content });
+      conversationHistory.push(ai.buildAssistantMessage(response.content));
 
       const toolResults = [];
 
-      for (const toolUse of toolUseBlocks) {
-        if (toolUse.name === 'run_ssh_command') {
-          const command = toolUse.input.command;
-          console.log(`[Diagnostic] Tool call ${iterations}: ${command}`);
-          sendEvent({ type: 'command', command, iteration: iterations });
+      for (const toolCall of toolCalls) {
+        const command = toolCall.command;
+        console.log(`[Diagnostic] [${backendId}] Tool call ${iterations}: ${command}`);
+        sendEvent({ type: 'command', command, iteration: iterations });
 
-          const startTime = Date.now();
-          const timeout = command.includes('docker') ? 120000 : 30000;
+        const startTime = Date.now();
+        const timeout = command.includes('docker') ? 120000 : 30000;
 
-          try {
+        try {
+          // SSH mode (mobile app sends credentials) vs local mode (desktop app)
+          let result;
+          if (username && password) {
             const conn = await sshManager.getConnection(username, password);
-            let result;
-            // Handle sudo commands
             if (command.trim().startsWith('sudo') && sudoPassword) {
               const sudoCmd = command.replace(/^sudo\s+/, '');
               result = await sshManager.execSudo(conn, sudoCmd, sudoPassword);
             } else {
               result = await sshManager.exec(conn, command, timeout);
             }
-
-            const duration = Date.now() - startTime;
-            toolCallsExecuted.push({ command, duration });
-            sendEvent({ type: 'command_done', command, duration });
-
-            const output = (result.output || '') + (result.stderr ? `\nSTDERR: ${result.stderr}` : '');
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: output || '(no output)',
-            });
-          } catch (err) {
-            const duration = Date.now() - startTime;
-            toolCallsExecuted.push({ command, duration });
-            sendEvent({ type: 'command_done', command, duration, error: err.message });
-
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUse.id,
-              content: `Error executing command: ${err.message}`,
-              is_error: true,
-            });
+          } else {
+            result = await localExec(command, timeout);
           }
+
+          const duration = Date.now() - startTime;
+          toolCallsExecuted.push({ command, duration });
+          sendEvent({ type: 'command_done', command, duration });
+
+          const output = (result.output || '') + (result.stderr ? `\nSTDERR: ${result.stderr}` : '');
+          toolResults.push(ai.buildToolResult(toolCall.id, output || '(no output)', false));
+        } catch (err) {
+          const duration = Date.now() - startTime;
+          toolCallsExecuted.push({ command, duration });
+          sendEvent({ type: 'command_done', command, duration, error: err.message });
+
+          toolResults.push(ai.buildToolResult(toolCall.id, `Error executing command: ${err.message}`, true));
         }
       }
 
-      conversationHistory.push({ role: 'user', content: toolResults });
+      conversationHistory.push(ai.buildToolResultsMessage(toolResults));
 
-      // Continue conversation with tool results (cached system prompt)
+      // Continue conversation with tool results
       sendEvent({ type: 'status', message: 'AI is analyzing results...' });
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
-        system: [
-          {
-            type: 'text',
-            text: fullSystemPrompt,
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        messages: conversationHistory,
-        tools: [SSH_TOOL],
-      });
+      response = await ai.chat(fullSystemPrompt, conversationHistory, true);
 
-      totalInputTokens += response.usage.input_tokens;
-      totalOutputTokens += response.usage.output_tokens;
-      if (response.usage.cache_read_input_tokens) {
-        cacheReadTokens += response.usage.cache_read_input_tokens;
-      }
-      if (response.usage.cache_creation_input_tokens) {
-        cacheCreationTokens += response.usage.cache_creation_input_tokens;
-      }
+      totalInputTokens += response.usage.inputTokens;
+      totalOutputTokens += response.usage.outputTokens;
+      cacheReadTokens += response.usage.cacheReadTokens;
+      cacheCreationTokens += response.usage.cacheCreationTokens;
     }
 
     // If still wants tools after max iterations, force text response
-    if (response.stop_reason === 'tool_use') {
+    if (response.stopReason === 'tool_use') {
       console.log('[Diagnostic] Max iterations reached, forcing summary');
-      conversationHistory.push({ role: 'assistant', content: response.content });
-      conversationHistory.push({
-        role: 'user',
-        content: 'Please summarize your findings based on the commands you have already run. Do not run any more commands.',
-      });
+      conversationHistory.push(ai.buildAssistantMessage(response.content));
+      conversationHistory.push(ai.buildForceSummaryMessage());
 
-      response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 4096,
-        system: [
-          {
-            type: 'text',
-            text: fullSystemPrompt,
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        messages: conversationHistory,
-        // No tools — forces text response
-      });
+      response = await ai.chat(fullSystemPrompt, conversationHistory, false);
 
-      totalInputTokens += response.usage.input_tokens;
-      totalOutputTokens += response.usage.output_tokens;
+      totalInputTokens += response.usage.inputTokens;
+      totalOutputTokens += response.usage.outputTokens;
     }
 
     // Extract final text
-    const textBlocks = response.content.filter(block => block.type === 'text');
-    const finalText = textBlocks.map(block => block.text).join('\n');
+    const finalText = ai.getText(response.content);
 
-    // Increment rate limit on success
-    const remaining = incrementRateLimit(userKey);
-
-    console.log(`[Diagnostic] Done: ${totalInputTokens} in, ${totalOutputTokens} out, ${toolCallsExecuted.length} commands, cache read: ${cacheReadTokens}`);
+    console.log(`[Diagnostic] [${backendId}] Done: ${totalInputTokens} in, ${totalOutputTokens} out, ${toolCallsExecuted.length} commands, cache read: ${cacheReadTokens}`);
 
     sendEvent({
       type: 'result',
       content: finalText,
+      backend: backendId,
+      model: resolvedModel || 'default',
       usage: {
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
@@ -435,17 +341,12 @@ router.post('/chat', requireCredentials, asyncHandler(async (req, res) => {
         iterations,
       },
       toolCalls: toolCallsExecuted,
-      rateLimit: {
-        remaining,
-        total: DAILY_LIMIT,
-        resetsAt: new Date(new Date().setHours(24, 0, 0, 0)).toISOString(),
-      },
     });
     res.end();
   } catch (error) {
-    console.error('[Diagnostic] Claude API error:', error.message);
+    console.error(`[Diagnostic] [${backendId}] API error:`, error.message);
 
-    sendEvent({ type: 'error', error: error.message || 'Diagnostic chat failed' });
+    sendEvent({ type: 'error', error: error.message || 'Diagnostic chat failed', backend: backendId });
     res.end();
   }
 }));
