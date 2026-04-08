@@ -19,7 +19,7 @@ router.post('/ssh-uname', requireCredentials, asyncHandler(async (req, res) => {
     kernel: 'uname -r',
     gpus: 'nvidia-smi --query-gpu=name --format=csv,noheader | wc -l',
     gpuModel: 'nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1',
-    bizonos: 'cat /etc/bizonos-version 2>/dev/null || bizonos 2>/dev/null || echo "Unknown"',
+    bizonos: 'cat /etc/bizonos-version 2>/dev/null || dpkg -s bizonos 2>/dev/null | grep "^Version:" | awk \'{print $2}\' || echo "Unknown"',
   };
 
   const results = await ssh.execMultiple(conn, commands);
@@ -84,7 +84,7 @@ router.post('/system-info', asyncHandler(async (req, res) => {
     cpu: 'lscpu | grep "Model name" | sed "s/Model name://g" | xargs',
     memory: 'free -h | grep Mem | awk \'{print $2}\'',
     gpu: 'nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo ""',
-    bizonos: 'cat /etc/bizonos-version 2>/dev/null || bizonos 2>/dev/null || echo "Unknown"',
+    bizonos: 'cat /etc/bizonos-version 2>/dev/null || dpkg -s bizonos 2>/dev/null | grep "^Version:" | awk \'{print $2}\' || echo "Unknown"',
   };
 
   const results = await ssh.execMultiple(conn, commands);
@@ -144,7 +144,7 @@ router.post('/detailed-specs', requireCredentials, asyncHandler(async (req, res)
     hostname: 'hostname',
     kernel: 'uname -r',
     os: 'lsb_release -ds 2>/dev/null || cat /etc/*release | grep "PRETTY_NAME" | sed \'s/PRETTY_NAME=//\' | tr -d \'"\' || cat /etc/issue | head -n 1',
-    bizonos: 'cat /etc/bizonos-version 2>/dev/null || bizonos 2>/dev/null || echo "Unknown"',
+    bizonos: 'cat /etc/bizonos-version 2>/dev/null || dpkg -s bizonos 2>/dev/null | grep "^Version:" | awk \'{print $2}\' || echo "Unknown"',
     uptime: 'uptime -p',
 
     // CPU
@@ -157,7 +157,7 @@ router.post('/detailed-specs', requireCredentials, asyncHandler(async (req, res)
 
     // Memory
     memory_total: 'free -h | grep "Mem:" | awk \'{print $2}\'',
-    memory_type: 'sudo dmidecode -t memory 2>/dev/null | grep -m 1 "Type:" | awk \'{print $2}\' || echo "Unknown"',
+    memory_type: 'sudo dmidecode -t memory 2>/dev/null | grep "Type: DDR" | head -1 | awk \'{print $2}\' || echo "Unknown"',
     memory_speed: 'sudo dmidecode -t memory 2>/dev/null | grep -m 1 "Speed:" | awk \'{print $2, $3}\' || echo "Unknown"',
     memory_slots: 'sudo dmidecode -t memory 2>/dev/null | grep -c "Memory Device" || echo "Unknown"',
     memory_used_slots: 'sudo dmidecode -t memory 2>/dev/null | grep -c "Size: [0-9]" || echo "Unknown"',
@@ -172,12 +172,13 @@ router.post('/detailed-specs', requireCredentials, asyncHandler(async (req, res)
     gpu_utilization: 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null || echo "Unknown"',
     gpu_memory_used: 'nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null || echo "Unknown"',
     gpu_power_limit: 'nvidia-smi --query-gpu=power.limit --format=csv,noheader 2>/dev/null || echo "Unknown"',
+    cuda_version: "nvcc --version 2>/dev/null | grep 'release' | awk '{print \}' | sed 's/,//' || echo 'Unknown'",
 
     // Storage
     storage_devices: 'lsblk -d -o NAME,SIZE,MODEL | grep -v "loop" | grep -v "NAME" || echo "Unknown"',
     root_partition: 'df -h / | grep -v "Filesystem" | awk \'{print $2, "total,", $3, "used,", $4, "free"}\'',
-    nvme_count: 'lsblk | grep -c "nvme" || echo "0"',
-    ssd_count: 'lsblk | grep -c "sda\\|sdb\\|sdc\\|sdd" || echo "0"',
+    nvme_count: 'lsblk -d -n | grep -c "nvme" || echo "0"',
+    ssd_count: 'lsblk -d -n | grep -cE "sd[a-z]" || echo "0"',
 
     // Network
     network_interfaces: 'ip -o link show | grep -v "lo:" | awk -F": " \'{print $2}\'',
@@ -201,8 +202,35 @@ router.post('/detailed-specs', requireCredentials, asyncHandler(async (req, res)
     pump_rpm: 'bizon-cooling-status pump 2>/dev/null || echo "Unknown"',
   };
 
-  const results = await ssh.execMultiple(conn, commands);
-  const r = (key) => results[key]?.output || 'Unknown';
+  // Split commands into regular and sudo-required
+  const sudoCommands = {};
+  const regularCommands = {};
+  for (const [key, cmd] of Object.entries(commands)) {
+    if (cmd.trim().startsWith('sudo ')) {
+      sudoCommands[key] = cmd.replace(/^sudo\s+/, '');
+    } else {
+      regularCommands[key] = cmd;
+    }
+  }
+
+  // Run regular commands in parallel batches
+  const results = await ssh.execMultiple(conn, regularCommands);
+
+  // Run sudo commands using execSudo with the user's password
+  for (const [key, cmd] of Object.entries(sudoCommands)) {
+    try {
+      results[key] = await ssh.execSudo(conn, cmd, password);
+    } catch (err) {
+      results[key] = { output: '', stderr: err.message, exitCode: -1 };
+    }
+  }
+
+  const r = (key) => {
+    let val = (results[key]?.output || '').trim();
+    // Strip sudo password prompt artifacts
+    if (val.startsWith('[sudo]')) val = val.split('\n').slice(1).join('\n').trim();
+    return val || 'Unknown';
+  };
 
   // Process GPU information
   let gpus = [];
@@ -297,6 +325,7 @@ router.post('/detailed-specs', requireCredentials, asyncHandler(async (req, res)
       count: r('gpu_count'),
       gpus,
       driver: r('gpu_driver'),
+      cuda: r('cuda_version'),
     },
     storage: {
       devices: storage,

@@ -68,7 +68,7 @@ Command reference (use only what's needed):
 - Memory: free -h
 - ECC errors: sudo ras-mc-ctl --summary 2>/dev/null
 - Disk space: df -h | grep -v tmpfs
-- Errors: dmesg | grep -iE "error|fail" | tail -20
+- Errors: sudo dmesg | grep -iE "error|fail" | tail -20
 - PCI devices: lspci | grep -iE "nvidia|vga|nvme"
 
 EFFICIENCY RULES:
@@ -272,7 +272,11 @@ router.post('/chat', asyncHandler(async (req, res) => {
           let result;
           if (username && password) {
             const conn = await sshManager.getConnection(username, password);
-            if (command.trim().startsWith('sudo') && sudoPassword) {
+            // Auto-elevate known privileged commands when sudoPassword is available
+            const SUDO_COMMANDS = ['dmesg', 'dmidecode', 'ras-mc-ctl', 'journalctl', 'smartctl', 'hdparm', 'lshw'];
+            const needsSudo = sudoPassword && !command.trim().startsWith('sudo') &&
+              SUDO_COMMANDS.some(c => command.trim().startsWith(c));
+            if ((command.trim().startsWith('sudo') || needsSudo) && sudoPassword) {
               const sudoCmd = command.replace(/^sudo\s+/, '');
               result = await sshManager.execSudo(conn, sudoCmd, sudoPassword);
             } else {
