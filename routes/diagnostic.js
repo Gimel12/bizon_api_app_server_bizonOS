@@ -270,20 +270,22 @@ router.post('/chat', asyncHandler(async (req, res) => {
         try {
           // SSH mode (mobile app sends credentials) vs local mode (desktop app)
           let result;
+          const SUDO_COMMANDS = ['dmesg', 'dmidecode', 'ras-mc-ctl', 'journalctl', 'smartctl', 'hdparm', 'lshw'];
+          const needsSudo = !command.trim().startsWith('sudo') &&
+            SUDO_COMMANDS.some(c => command.trim().startsWith(c));
+
           if (username && password) {
             const conn = await sshManager.getConnection(username, password);
-            // Auto-elevate known privileged commands when sudoPassword is available
-            const SUDO_COMMANDS = ['dmesg', 'dmidecode', 'ras-mc-ctl', 'journalctl', 'smartctl', 'hdparm', 'lshw'];
-            const needsSudo = sudoPassword && !command.trim().startsWith('sudo') &&
-              SUDO_COMMANDS.some(c => command.trim().startsWith(c));
-            if ((command.trim().startsWith('sudo') || needsSudo) && sudoPassword) {
+            if ((command.trim().startsWith('sudo') || (needsSudo && sudoPassword)) && sudoPassword) {
               const sudoCmd = command.replace(/^sudo\s+/, '');
               result = await sshManager.execSudo(conn, sudoCmd, sudoPassword);
             } else {
               result = await sshManager.exec(conn, command, timeout);
             }
           } else {
-            result = await localExec(command, timeout);
+            // Local mode — server runs as root, so elevate privileged commands directly
+            const runAsRoot = command.trim().startsWith('sudo') || (needsSudo && sudoPassword);
+            result = await localExec(command, timeout, { asRoot: runAsRoot });
           }
 
           const duration = Date.now() - startTime;
